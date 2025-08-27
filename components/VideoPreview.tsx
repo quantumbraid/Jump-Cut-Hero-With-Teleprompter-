@@ -31,9 +31,6 @@ const VideoPreview: React.FC<VideoPreviewProps> = ({ stream, videoUrl, recording
             videoElement.controls = true;
             videoElement.classList.remove('scale-x-[-1]'); // Always un-mirror for playback
             videoElement.load(); // Explicitly load the new source
-            videoElement.play().catch(error => {
-                console.log("Playback failed, user interaction may be required.", error);
-            });
         } else if (stream) {
             // Switch to live preview mode
             videoElement.src = '';
