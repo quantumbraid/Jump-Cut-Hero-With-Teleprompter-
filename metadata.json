@@ -1,0 +1,8 @@
+{
+  "name": "Jump Cut Hero W Prompter",
+  "description": "An intelligent video recorder that automatically removes silent pauses, creating jump-cut style videos without any manual editing. Just record, and the app pauses during dead air, delivering a tightly edited video ready for download.\n\n\n",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
