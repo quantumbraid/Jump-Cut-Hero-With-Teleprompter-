@@ -25,6 +25,9 @@ const App = () => {
     const [currentLineIndex, setCurrentLineIndex] = useState<number>(0);
     const [isManuallyPaused, setIsManuallyPaused] = useState<boolean>(false);
 
+    // Live stream state for preview
+    const [liveStream, setLiveStream] = useState<MediaStream | null>(null);
+
     const streamRef = useRef<MediaStream | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const recordedChunksRef = useRef<Blob[]>([]);
@@ -37,11 +40,16 @@ const App = () => {
     
     const getDevices = useCallback(async () => {
         try {
+            // First, request permissions to get device labels and ensure access.
+            await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            setHasPermissions(true);
             const allDevices = await navigator.mediaDevices.enumerateDevices();
             const videoDevices = allDevices.filter(device => device.kind === 'videoinput');
             setDevices(videoDevices);
         } catch (err: any) {
-            console.error("Could not enumerate devices:", err);
+            setError('Could not access camera/microphone. Please check permissions in your browser settings.');
+            console.error("Permission or device error:", err);
+            setHasPermissions(false);
         }
     }, []);
 
@@ -54,37 +62,80 @@ const App = () => {
     }, [getDevices]);
 
     useEffect(() => {
-        if (devices.length > 0 && !devices.some(d => d.deviceId === selectedDeviceId)) {
+        if (devices.length > 0 && !selectedDeviceId) {
             setSelectedDeviceId(devices[0].deviceId);
         }
     }, [devices, selectedDeviceId]);
 
-    useEffect(() => {
-        if (hasPermissions) {
-            getDevices();
-        }
-    }, [hasPermissions, getDevices]);
-
-    const cleanup = useCallback(() => {
-        if (animationFrameRef.current) {
-            cancelAnimationFrame(animationFrameRef.current);
-        }
+    const stopPreviewStream = useCallback(() => {
         if (streamRef.current) {
             streamRef.current.getTracks().forEach(track => track.stop());
             streamRef.current = null;
+            setLiveStream(null);
+        }
+    }, []);
+    
+    const cleanupRecording = useCallback(() => {
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
         }
         if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
             audioContextRef.current.close();
+            audioContextRef.current = null;
         }
         mediaRecorderRef.current = null;
         recordedChunksRef.current = [];
     }, []);
 
+    const startPreview = useCallback(async () => {
+        if (streamRef.current) {
+            stopPreviewStream();
+        }
+
+        if (!selectedDeviceId) return;
+
+        const videoConstraints: MediaTrackConstraints = {
+            deviceId: { exact: selectedDeviceId },
+        };
+        if (orientation === 'landscape') {
+            videoConstraints.width = { ideal: 1280 };
+            videoConstraints.height = { ideal: 720 };
+        } else {
+            videoConstraints.width = { ideal: 720 };
+            videoConstraints.height = { ideal: 1280 };
+        }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: true });
+            streamRef.current = stream;
+            setLiveStream(stream);
+            setError(null);
+        } catch (err: any) {
+            if (err.name === 'OverconstrainedError') {
+                setError(`The selected camera does not support ${orientation} orientation. Please try another setting or camera.`);
+            } else {
+                setError('Could not access camera/microphone. Please check permissions.');
+            }
+            setLiveStream(null);
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+                streamRef.current = null;
+            }
+        }
+    }, [selectedDeviceId, orientation, stopPreviewStream]);
+
+    useEffect(() => {
+        if (recordingState === RecordingState.IDLE && hasPermissions) {
+            startPreview();
+        }
+    }, [selectedDeviceId, orientation, recordingState, hasPermissions, startPreview]);
+
     useEffect(() => {
         return () => {
-            cleanup();
+            cleanupRecording();
+            stopPreviewStream();
         };
-    }, [cleanup]);
+    }, [cleanupRecording, stopPreviewStream]);
 
     const stopRecording = useCallback(() => {
         if (mediaRecorderRef.current && recordingState !== RecordingState.IDLE && recordingState !== RecordingState.STOPPED) {
@@ -155,13 +206,14 @@ const App = () => {
             const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
             const url = URL.createObjectURL(blob);
             setVideoUrl(url);
-            cleanup();
+            cleanupRecording();
+            stopPreviewStream();
         };
         
         mediaRecorderRef.current.start(1000); 
         runAudioAnalysis();
 
-    }, [cleanup, runAudioAnalysis]);
+    }, [cleanupRecording, runAudioAnalysis, stopPreviewStream]);
 
     const startCalibration = useCallback(async () => {
         setRecordingState(RecordingState.CALIBRATING);
@@ -174,23 +226,11 @@ const App = () => {
         setScriptLines(lines);
         setCurrentLineIndex(0);
 
-        const videoConstraints: MediaTrackConstraints = {
-            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
-        };
-        if (orientation === 'landscape') {
-            videoConstraints.aspectRatio = { ideal: 16 / 9 };
-            videoConstraints.width = { ideal: 1280 };
-            videoConstraints.height = { ideal: 720 };
-        } else {
-            videoConstraints.aspectRatio = { ideal: 9 / 16 };
-            videoConstraints.width = { ideal: 720 };
-            videoConstraints.height = { ideal: 1280 };
-        }
-
         try {
-            streamRef.current = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: true });
-            if (!hasPermissions) {
-                setHasPermissions(true);
+            if (!streamRef.current) {
+                setError("Camera stream is not available. Please check permissions and camera selection.");
+                setRecordingState(RecordingState.IDLE);
+                return;
             }
 
             audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -230,15 +270,11 @@ const App = () => {
 
             }, CALIBRATION_TIME_MS);
         } catch (err: any) {
-            if (err.name === 'OverconstrainedError') {
-                setError(`The selected camera does not support ${orientation} orientation. Please try another setting or camera.`);
-            } else {
-                setError('Could not access camera/microphone. Please check permissions.');
-            }
+            setError('Could not start recording process. Please try again.');
             setRecordingState(RecordingState.IDLE);
-            cleanup();
+            cleanupRecording();
         }
-    }, [cleanup, hasPermissions, orientation, selectedDeviceId, startActualRecording, script]);
+    }, [cleanupRecording, startActualRecording, script]);
     
     const handleReset = () => {
         setRecordingState(RecordingState.IDLE);
@@ -247,7 +283,7 @@ const App = () => {
         setScriptLines([]);
         setCurrentLineIndex(0);
         setIsManuallyPaused(false);
-        cleanup();
+        cleanupRecording();
     };
     
     const handleManualPause = () => {
@@ -395,15 +431,23 @@ const App = () => {
                 
                 <div className="w-full relative">
                      <StatusIndicator state={recordingState} calibrationCountdown={calibrationCountdown} />
-                     <VideoPreview 
-                        stream={streamRef.current} 
-                        videoUrl={videoUrl} 
-                        recordingState={recordingState}
-                        isMirrored={isMirrored}
-                        orientation={orientation}
-                        currentScriptLine={scriptLines[currentLineIndex]}
-                        onScriptScroll={handleScriptScroll}
-                    />
+                      {(!liveStream && !videoUrl && recordingState === RecordingState.IDLE) ? (
+                        <div className={`${orientation === 'landscape' ? 'aspect-video' : 'aspect-[9/16]'} w-full rounded-lg bg-black flex items-center justify-center shadow-2xl ring-2 ring-gray-700`}>
+                            <p className="text-gray-500 px-4 text-center">
+                                {hasPermissions ? 'Select a camera to start preview' : 'Awaiting camera & microphone permissions...'}
+                            </p>
+                        </div>
+                    ) : (
+                        <VideoPreview 
+                            stream={liveStream} 
+                            videoUrl={videoUrl} 
+                            recordingState={recordingState}
+                            isMirrored={isMirrored}
+                            orientation={orientation}
+                            currentScriptLine={scriptLines[currentLineIndex]}
+                            onScriptScroll={handleScriptScroll}
+                        />
+                    )}
                 </div>
                 {error && <p className="text-red-500">{error}</p>}
                 <div className="h-20 flex items-center justify-center">
