@@ -31,6 +31,7 @@ const App = () => {
     const streamRef = useRef<MediaStream | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const recordedChunksRef = useRef<Blob[]>([]);
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
     
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
@@ -161,7 +162,6 @@ const App = () => {
         const isSilent = averageVolume < silenceThresholdRef.current * SILENCE_MULTIPLIER;
         const isLoudEnoughToResume = averageVolume > silenceThresholdRef.current * SOUND_MULTIPLIER;
 
-        // A positive tightness value should DECREASE the pause time (tighter cuts).
         const silenceDetectionTime = BASE_SILENCE_DETECTION_TIME_MS - (pauseTightness * PAUSE_TIGHTNESS_STEP_MS);
 
         if (mediaRecorderRef.current) {
@@ -192,9 +192,22 @@ const App = () => {
     const startActualRecording = useCallback(() => {
         if (!streamRef.current) return;
         setRecordingState(RecordingState.RECORDING);
+        
+        let streamToRecord: MediaStream;
+        if (canvasRef.current) {
+            const canvasStream = canvasRef.current.captureStream(30); // 30 FPS
+            const audioTracks = streamRef.current.getAudioTracks();
+            if (audioTracks.length > 0) {
+                canvasStream.addTrack(audioTracks[0]);
+            }
+            streamToRecord = canvasStream;
+        } else {
+            // Fallback to the direct stream if canvas isn't ready
+            streamToRecord = streamRef.current;
+        }
 
-        const options = { mimeType: 'video/webm; codecs=vp9' };
-        mediaRecorderRef.current = new MediaRecorder(streamRef.current, options);
+        const options = { mimeType: 'video/webm' };
+        mediaRecorderRef.current = new MediaRecorder(streamToRecord, options);
 
         mediaRecorderRef.current.ondataavailable = (event) => {
             if (event.data.size > 0) {
@@ -210,7 +223,11 @@ const App = () => {
             stopPreviewStream();
         };
         
-        mediaRecorderRef.current.start(1000); 
+        // By removing the timeslice (the 1000ms argument), we get a single blob on 'stop'.
+        // This often produces a more robust file, especially when using pause/resume,
+        // as it avoids issues with stitching together many small chunks with potential
+        // timestamp inconsistencies that can corrupt the final video file.
+        mediaRecorderRef.current.start(); 
         runAudioAnalysis();
 
     }, [cleanupRecording, runAudioAnalysis, stopPreviewStream]);
@@ -446,6 +463,7 @@ const App = () => {
                             orientation={orientation}
                             currentScriptLine={scriptLines[currentLineIndex]}
                             onScriptScroll={handleScriptScroll}
+                            onCanvasReady={(canvas) => { canvasRef.current = canvas; }}
                         />
                     )}
                 </div>

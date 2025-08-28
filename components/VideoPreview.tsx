@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { RecordingState } from '../types';
 
 interface VideoPreviewProps {
@@ -9,59 +9,118 @@ interface VideoPreviewProps {
     orientation: 'landscape' | 'portrait';
     currentScriptLine?: string;
     onScriptScroll?: (direction: 'up' | 'down') => void;
+    onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
 }
 
-const VideoPreview: React.FC<VideoPreviewProps> = ({ stream, videoUrl, recordingState, isMirrored, orientation, currentScriptLine, onScriptScroll }) => {
-    const videoRef = React.useRef<HTMLVideoElement>(null);
+const VideoPreview: React.FC<VideoPreviewProps> = ({ stream, videoUrl, recordingState, isMirrored, orientation, currentScriptLine, onScriptScroll, onCanvasReady }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
     const lastScrollTime = useRef(0);
     const touchStartY = useRef<number | null>(null);
 
     const SCROLL_DEBOUNCE_MS = 200; // Prevent scrolling too fast
     const TOUCH_SCROLL_THRESHOLD = 30; // Min pixels to swipe
 
-    React.useEffect(() => {
+    useEffect(() => {
         const videoElement = videoRef.current;
         if (!videoElement) return;
 
         if (videoUrl) {
-            // Switch to playback mode
+            // Setup for playback
             videoElement.srcObject = null;
             videoElement.src = videoUrl;
             videoElement.muted = false;
             videoElement.controls = true;
-            videoElement.classList.remove('scale-x-[-1]'); // Always un-mirror for playback
-            videoElement.load(); // Explicitly load the new source
-        } else if (stream) {
-            // Switch to live preview mode
-            videoElement.src = '';
-            videoElement.srcObject = stream;
-            videoElement.muted = true;
-            videoElement.controls = false;
-            // Apply mirroring based on prop
-            if (isMirrored) {
-                videoElement.classList.add('scale-x-[-1]');
-            } else {
-                videoElement.classList.remove('scale-x-[-1]');
-            }
-            videoElement.play().catch(error => {
-                console.log("Stream preview failed to play.", error);
-            });
+            videoElement.load();
         } else {
-             // Clean up if no source
-             videoElement.srcObject = null;
-             videoElement.src = '';
-             videoElement.controls = false;
+            // Cleanup for live view
+            videoElement.src = '';
+            videoElement.controls = false;
         }
-    }, [stream, videoUrl, isMirrored]);
+    }, [videoUrl]);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+
+        if (videoUrl || !stream || !video || !canvas) {
+            if (onCanvasReady) {
+                onCanvasReady(null);
+            }
+            return;
+        }
+
+        if (onCanvasReady) {
+            onCanvasReady(canvas);
+        }
+
+        video.srcObject = stream;
+        video.muted = true;
+        video.play().catch(error => {
+            console.log("Stream preview failed to play.", error);
+        });
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        let animationFrameId: number;
+
+        const drawFrame = () => {
+            if (!videoRef.current || video.paused || video.ended || video.readyState < video.HAVE_METADATA) {
+                animationFrameId = requestAnimationFrame(drawFrame);
+                return;
+            }
+
+            const videoWidth = video.videoWidth;
+            const videoHeight = video.videoHeight;
+            
+            if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+                canvas.width = canvas.clientWidth;
+                canvas.height = canvas.clientHeight;
+            }
+            
+            const canvasWidth = canvas.width;
+            const canvasHeight = canvas.height;
+
+            const videoAspect = videoWidth / videoHeight;
+            const canvasAspect = canvasWidth / canvasHeight;
+
+            let sx = 0, sy = 0, sWidth = videoWidth, sHeight = videoHeight;
+
+            if (videoAspect > canvasAspect) {
+                sWidth = videoHeight * canvasAspect;
+                sx = (videoWidth - sWidth) / 2;
+            } else {
+                sHeight = videoWidth / canvasAspect;
+                sy = (videoHeight - sHeight) / 2;
+            }
+            
+            ctx.save();
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+            if (isMirrored) {
+                ctx.scale(-1, 1);
+                ctx.translate(-canvasWidth, 0);
+            }
+
+            ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, canvasWidth, canvasHeight);
+            ctx.restore();
+
+            animationFrameId = requestAnimationFrame(drawFrame);
+        };
+
+        drawFrame();
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+        };
+    }, [stream, videoUrl, isMirrored, onCanvasReady]);
 
     const aspectClass = orientation === 'landscape' ? 'aspect-video' : 'aspect-[9/16]';
-    const baseClasses = 'w-full rounded-lg shadow-2xl bg-black transition-all duration-300 relative';
+    const baseClasses = 'w-full rounded-lg shadow-2xl bg-black transition-all duration-300 relative overflow-hidden';
     const isRecordingActive = recordingState === RecordingState.RECORDING || recordingState === RecordingState.PAUSED;
     const borderClass = isRecordingActive ? 'ring-4 ring-red-500 ring-offset-4 ring-offset-gray-900' : 'ring-2 ring-gray-700';
     
-    // Using object-contain to ensure the full video is visible.
-    const videoClasses = "w-full h-full object-contain rounded-lg";
-
     const shouldShowTeleprompter = isRecordingActive && currentScriptLine;
 
     const handleWheel = (e: React.WheelEvent) => {
@@ -88,13 +147,11 @@ const VideoPreview: React.FC<VideoPreviewProps> = ({ stream, videoUrl, recording
         const deltaY = currentY - touchStartY.current;
 
         if (Math.abs(deltaY) > TOUCH_SCROLL_THRESHOLD) {
-             // Swipe up (negative deltaY) advances to the next line
-            if (deltaY < 0) {
+             if (deltaY < 0) {
                 onScriptScroll('down');
-            } else { // Swipe down (positive deltaY) goes to the previous line
+            } else {
                 onScriptScroll('up');
             }
-            // Reset to prevent multiple triggers for one long swipe
             touchStartY.current = null; 
         }
     };
@@ -108,8 +165,10 @@ const VideoPreview: React.FC<VideoPreviewProps> = ({ stream, videoUrl, recording
             <video
                 ref={videoRef}
                 playsInline
-                className={videoClasses}
+                className={videoUrl ? "w-full h-full object-contain rounded-lg" : "hidden"}
             />
+            {!videoUrl && <canvas ref={canvasRef} className="w-full h-full" />}
+            
             {shouldShowTeleprompter && (
                 <>
                     <div 
